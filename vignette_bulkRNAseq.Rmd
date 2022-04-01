@@ -1,9 +1,17 @@
 ---
 title: "Bulk RNA-seq Analysis Report"
+knit: (function(input_file, encoding) {
+    out_dir <- 'docs';
+    rmarkdown::render(input_file,
+      encoding=encoding,
+      output_file=file.path(dirname(input_file), out_dir, 'index.html'))})
+  
 author:
-- "Grieco Mariachiara"
-- 'mail: mariachiara.grieco@studenti.unimi.it'
-output: html_document
+- "Grieco Mariachiara mariachiara.grieco@studenti.unimi.it"
+output:   
+  rmdformats::downcute:
+    self_contained: true
+    df_print: paged
 date: "30 September 2021"
 abstract: Analysis on bulk RNA-Seq samples for finding and characterizing DE genes
 key: Transcriptomics Course 2021
@@ -14,6 +22,10 @@ library(knitr)
 library(rmdformats)
 knitr::opts_chunk$set(echo = TRUE, results = TRUE, warning = FALSE, message = FALSE)
 ```
+
+# Introduction
+In this report, a bulk-RNA seq analysis is performed comparing samples from colon, heart
+and liver Three samples from each tissue are retrieved from Recount2 and are analyzed for finding differentially expressed genes that characterize one tissue with respect to the other ones.
 
 ```{r libraries, message=FALSE }
 # Importing libraries --------------
@@ -35,10 +47,6 @@ library(clusterProfiler)
 ```{r wd, echo =FALSE}
 wd <- "/home/mariachiara/Desktop/University/transcript/project/"
 ```
-
-# Introduction
-In this report, a bulk-RNA seq analysis is performed comparing samples from colon, heart
-and liver Three samples from each tissue are retrieved from Recount2 and are analyzed for finding differentially expressed genes that characterize one tissue with respect to the other ones.
 
 # Loading data
 Data for each tissue are in the “Ranged Summarized Experiment” format of Recount2.
@@ -75,10 +83,10 @@ colon_gtex_sampid <- colon_coldata$sampid[2:4]
 
 From the tables, we will:
 
-* select the column we are interested in
+* select the columns we are interested in
 * remove all genes with length < 200
 * remove all mitochondrial genes
-* merge them into a single count table, for subsequent analyses
+* merge them into a single count table for subsequent analyses
 
 Here we check that counts have already been normalized/scaled (to 40M reads per column) (e.g., check that the number of reads is less than or equal to 40 million)
 ```{r}
