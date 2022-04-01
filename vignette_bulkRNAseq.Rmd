@@ -1,0 +1,652 @@
+---
+title: "Bulk RNA-seq Analysis Report"
+author:
+- "Grieco Mariachiara"
+- 'mail: mariachiara.grieco@studenti.unimi.it'
+output: html_document
+date: "30 September 2021"
+abstract: Analysis on bulk RNA-Seq samples for finding and characterizing DE genes
+key: Transcriptomics Course 2021
+---
+
+```{r setup, include=FALSE}
+library(knitr)
+library(rmdformats)
+knitr::opts_chunk$set(echo = TRUE, results = TRUE, warning = FALSE, message = FALSE)
+```
+
+```{r libraries, message=FALSE }
+# Importing libraries --------------
+library(limma)
+library(edgeR)
+library(DESeq2)
+library(recount)
+library(dplyr)
+library(ggplot2)
+library(reshape2)
+library(RColorBrewer)
+library(viridis)
+library(gridExtra)
+library(grid)
+library(org.Hs.eg.db)
+library(clusterProfiler)
+```
+
+```{r wd, echo =FALSE}
+wd <- "/home/mariachiara/Desktop/University/transcript/project/"
+```
+
+# Introduction
+In this report, a bulk-RNA seq analysis is performed comparing samples from colon, heart
+and liver Three samples from each tissue are retrieved from Recount2 and are analyzed for finding differentially expressed genes that characterize one tissue with respect to the other ones.
+
+# Loading data
+Data for each tissue are in the “Ranged Summarized Experiment” format of Recount2.
+
+```{r loading data}
+load(paste0(wd,"rse_gene_liver_9_scaled.Rdata"))
+liver <- rse
+liver_counts <- as.data.frame(assay(liver)[,2:4])
+liver_sample_id <- colnames(liver_counts)
+colnames(liver_counts) <- c('rep2','rep3','rep4')
+liver_coldata <-as.data.frame(liver@colData)
+liver_gtex_sampid <- liver_coldata$sampid[2:4]
+
+load(paste0(wd,"rse_gene_heart_6_scaled.Rdata"))
+heart <- rse
+heart_counts <- as.data.frame(assay(heart)[,c(9,10,1)])
+heart_sample_id <- colnames(heart_counts)
+colnames(heart_counts) <- c('rep9','rep10','rep1')
+heart_coldata <-as.data.frame(heart@colData)
+heart_gtex_sampid <- heart_coldata$sampid[c(9,10,1)]
+
+load(paste0(wd,"rse_gene_colon_7_scaled.Rdata"))
+colon <- rse
+colon_counts <- as.data.frame(assay(colon)[,2:4])
+colon_sample_id <- colnames(colon_counts)
+colnames(colon_counts) <- c('rep2','rep3','rep4')
+colon_coldata <-as.data.frame(colon@colData)
+colon_gtex_sampid <- colon_coldata$sampid[2:4]
+
+
+```
+
+# Preprocessing
+
+From the tables, we will:
+
+* select the column we are interested in
+* remove all genes with length < 200
+* remove all mitochondrial genes
+* merge them into a single count table, for subsequent analyses
+
+Here we check that counts have already been normalized/scaled (to 40M reads per column) (e.g., check that the number of reads is less than or equal to 40 million)
+```{r}
+colSums(liver_counts)/ 1e6
+colSums(heart_counts) / 1e6
+colSums(colon_counts)/ 1e6
+```
+
+Now we remove genes shorter than 200 bp.
+rowData is a dataframe object describing the rows.
+Row names, if present, become the row names of the SummarizedExperiment object.
+In the rowData are included: gene_id, bp_length and symbol (if present). Row names are the gene_id.
+
+```{r}
+# The number of rows of the DataFrame must equal the number of rows of the matrices in assays.
+# We can check this by doing:
+dim(rowData(liver))
+dim(assay(liver))
+
+```
+
+In this case, since all row data are identical – they represent the Gencode V25 comprehensive annotation - we can just use one of the tree to identify the short genes and the mt ones, to carry out then the filtering. 
+
+```{r short genes}
+shortgenes <- as.data.frame(subset(rowData(liver), bp_length < 200))
+dim(shortgenes)
+```
+
+Selecting mt genes:
+If a gene is both “short” and on the MT DNA, it has to be considered among the “short” genes and not a MT gene.
+
+```{r mt genes}
+mt_genes <- as.data.frame(subset(rowRanges(liver), seqnames == 'chrM' & bp_length >= 200))
+dim(mt_genes)
+
+
+```
+
+
+Just for check, we can ensure that also in the heart and colon rowData the number of short genes is equal to the liver one.
+
+```{r}
+dim(subset(rowData(heart), bp_length < 200))[1]
+#colon
+dim(subset(rowData(colon), bp_length < 200))[1]
+
+```
+
+We can create a function to find the short and the mitochondrial genes previosly selected, that can be applied on the tree datasets we have.
+
+```{r function to find short and mt}
+find_short <- function(count_table, short) {
+  counts_short <- count_table %>% filter(row.names(count_table) %in% short$gene_id)
+  return(counts_short)
+}
+
+find_mt <- function(count_table, mt) {
+  counts_mt <- count_table %>% filter(row.names(count_table) %in% mt$gene_id)
+  return(counts_mt)
+}
+
+  
+liver_shortgenes <- find_short(liver_counts,shortgenes)
+liver_mtgenes <- find_mt(liver_counts, mt_genes)
+
+heart_shortgenes <- find_short(heart_counts,shortgenes)
+heart_mtgenes <- find_mt(heart_counts, mt_genes)
+
+colon_shortgenes <- find_short(colon_counts,shortgenes)
+colon_mtgenes <- find_mt(colon_counts, mt_genes)
+
+
+liver_counts_table <- data.frame('tissue' = 'liver',
+                           'column' = colnames(liver_counts),
+                           'tot_short_genes' = rep(dim(shortgenes)[1],3),
+                           'tot_mt_genes' = rep(dim(mt_genes)[1],3),
+                           'tot_reads' = colSums(liver_counts),
+                           'tot_reads_short_genes' = colSums(liver_shortgenes),
+                           'perc_reads_short_genes' = round((colSums(liver_shortgenes)/colSums(liver_counts))*100,2),
+                           'tot_reads_mt_genes' = colSums(liver_mtgenes),
+                           'perc_reads_mt_genes' = round((colSums(liver_mtgenes)/colSums(liver_counts))*100,2)
+)
+
+#heart 
+heart_counts_table <- data.frame('tissue' = 'heart',
+                           'column' = colnames(heart_counts),
+                           'tot_short_genes' = rep(dim(shortgenes)[1],3),
+                           'tot_mt_genes' = rep(dim(mt_genes)[1],3),
+                           'tot_reads' = colSums(heart_counts),
+                           'tot_reads_short_genes' = colSums(heart_shortgenes),
+                           'perc_reads_short_genes' = round((colSums(heart_shortgenes)/colSums(heart_counts))*100,2),
+                           'tot_reads_mt_genes' = colSums(heart_mtgenes),
+                           'perc_reads_mt_genes' = round((colSums(heart_mtgenes)/colSums(heart_counts))*100,2)
+                           
+)
+
+#colon
+colon_counts_table <- data.frame('tissue' = 'colon',
+                           'column' = colnames(colon_counts),
+                           'tot_short_genes' = rep(dim(shortgenes)[1],3),
+                           'tot_mt_genes' = rep(dim(mt_genes)[1],3),
+                           'tot_reads' = colSums(colon_counts),
+                           'tot_reads_short_genes' = colSums(colon_shortgenes),
+                           'perc_reads_short_genes' = round((colSums(colon_shortgenes)/colSums(colon_counts))*100,2),
+                           'tot_reads_mt_genes' = colSums(colon_mtgenes),
+                           'perc_reads_mt_genes' = round((colSums(colon_mtgenes)/colSums(colon_counts))*100,2)
+                           
+)
+
+
+counts_table <- rbind(liver_counts_table,heart_counts_table,colon_counts_table)
+
+
+```
+
+
+Now we create a new counts table containing the counts of NO short and NO mt genes for each rep in each tissue for subsequential analysis. 
+The resulting total number of gene to keep should be equal to 58037 (tot genes) -7341 (short) -15 (mt) = 50681
+
+```{r merge tables}
+liver_count_filtered <- liver_counts %>% filter(!row.names(liver_counts) %in% shortgenes$gene_id) 
+liver_count_filtered <- liver_count_filtered %>% filter(!row.names(liver_count_filtered) %in% mt_genes$gene_id) 
+
+heart_count_filtered <- heart_counts %>% filter(!row.names(heart_counts) %in% shortgenes$gene_id) 
+heart_count_filtered <- heart_count_filtered %>% filter(!row.names(heart_count_filtered) %in% mt_genes$gene_id) 
+
+colon_count_filtered <- colon_counts %>% filter(!row.names(colon_counts) %in% shortgenes$gene_id) 
+colon_count_filtered <- colon_count_filtered %>% filter(!row.names(colon_count_filtered) %in% mt_genes$gene_id) 
+
+counts <- cbind(liver_count_filtered, heart_count_filtered, colon_count_filtered)
+colnames(counts) <- c('liver2','liver3','liver4',
+                      'heart9','heart10','heart1',
+                      'colon2','colon3','colon4')
+
+```
+
+
+# DEG analysis using EdgeR
+The DEG analysis will be performed using EdgeR.
+Firstly, the count table needs to be converted into a DGEList object, which contains all the data stored in a better way for usage with edgeR and allows to subsequently add further data derived from the following steps of the analysis itself.
+Then, we will set the design matrix.
+
+```{r create DGE object}
+de_object <- DGEList(counts = counts)
+```
+
+Now, we have to label the samples:
+```{r label sample}
+tissue <- factor(c(rep('liver',3),rep('heart',3),rep('colon',3)),levels = c('liver','heart','colon'))
+de_object$samples$group <- tissue
+```
+
+```{r}
+table(rowSums(de_object$counts==0)==9)
+```
+
+Remove altogether all genes with low or zero counts.
+```{r remove low counts}
+exprs2keep <- filterByExpr(de_object, group=tissue)
+de_object_filtered <- de_object[exprs2keep,, keep.lib.sizes=FALSE]
+dim(de_object)
+dim(de_object_filtered)
+```
+
+Store in a vector the log of the counts per million before normalization with the "cpm" function:
+```{r cpm}
+logcpm_no_norm <- as.data.frame(cpm(de_object_filtered, log=TRUE))
+```
+
+```{r}
+melt_logcpm_no_norm <- melt(logcpm_no_norm)
+colnames(melt_logcpm_no_norm) <- c('sample','log2_no_norm_count')
+
+melt_logcpm_no_norm_liver <- melt(logcpm_no_norm[,1:3])
+colnames(melt_logcpm_no_norm_liver) <- c('sample','log2_no_norm_count')
+melt_logcpm_no_norm_liver$tissue <- 'liver'
+
+melt_logcpm_no_norm_heart <- melt(logcpm_no_norm[,4:6])
+colnames(melt_logcpm_no_norm_heart) <- c('sample','log2_no_norm_count')
+melt_logcpm_no_norm_heart$tissue <- 'heart'
+
+melt_logcpm_no_norm_colon <- melt(logcpm_no_norm[,7:9])
+colnames(melt_logcpm_no_norm_colon) <- c('sample','log2_no_norm_count')
+melt_logcpm_no_norm_colon$tissue <- 'colon'
+
+melt_logcpm_no_norm_tissue <- rbind(melt_logcpm_no_norm_liver,
+                                 melt_logcpm_no_norm_heart,
+                                 melt_logcpm_no_norm_colon)
+melt_logcpm_no_norm_tissue$tissue <- factor(melt_logcpm_no_norm_tissue$tissue,
+                                         levels = c('liver','heart','colon'))
+
+```
+
+
+
+```{r}
+#This is the palette used to plot the three tissue in all downstream analysis
+mypalette <- brewer.pal(8,'Set3')[c(3,4,7)]
+```
+
+
+```{r fig.width=9, fig.height=5}
+ggplot(melt_logcpm_no_norm_tissue, aes(x=sample, y = log2_no_norm_count, fill = tissue)) + 
+  geom_boxplot(outlier.shape = NA, notch = TRUE) +
+  scale_fill_manual(values = mypalette,
+                    name = 'Tissue',
+                    labels = c('Liver','Heart','Colon')) +
+  scale_x_discrete(labels = c(liver_sample_id,heart_sample_id,colon_sample_id)) +
+  xlab('samples') + ylab('log2(counts)') +
+  ggtitle('Not normalized counts') +
+  theme_bw()
+
+```
+
+## TMM normalization
+TMM normalization is the default method used by edgeR to normalize data, based on a trimmed scaling factor for each column (sample).
+
+```{r tmm normalization}
+de_object_normalized <- calcNormFactors(de_object_filtered, method = "TMM")
+```
+
+## log2CPM 
+The read counts are again stored as the log(CPM).
+
+```{r log2pcm}
+logcpm_norm <- as.data.frame(cpm(de_object_normalized, log=TRUE))
+
+melt_logcpm_norm <- melt(logcpm_norm)
+colnames(melt_logcpm_norm) <- c('sample','log2_norm_count')
+
+melt_logcpm_norm_liver <- melt(logcpm_norm[,1:3])
+colnames(melt_logcpm_norm_liver) <- c('sample','log2_norm_count')
+melt_logcpm_norm_liver$tissue <- 'liver'
+
+melt_logcpm_norm_heart <- melt(logcpm_norm[,4:6])
+colnames(melt_logcpm_norm_heart) <- c('sample','log2_norm_count')
+melt_logcpm_norm_heart$tissue <- 'heart'
+
+melt_logcpm_norm_colon <- melt(logcpm_norm[,7:9])
+colnames(melt_logcpm_norm_colon) <- c('sample','log2_norm_count')
+melt_logcpm_norm_colon$tissue <- 'colon'
+
+melt_logcpm_norm_tissue <- rbind(melt_logcpm_norm_liver,
+                                 melt_logcpm_norm_heart,
+                                 melt_logcpm_norm_colon)
+melt_logcpm_norm_tissue$tissue <- factor(melt_logcpm_norm_tissue$tissue,
+                                         levels = c('liver','heart','colon'))
+
+```
+
+```{r fig.width=9, fig.height=5}
+ggplot(melt_logcpm_norm_tissue, aes(x=sample, y = log2_norm_count, fill = tissue)) + 
+  geom_boxplot(outlier.shape = NA, notch = TRUE) +
+  scale_fill_manual(values = mypalette,
+                    name = 'Tissue',
+                    labels = c('Liver','Heart','Colon')) +
+  scale_x_discrete(labels = c(liver_sample_id,heart_sample_id,colon_sample_id)) +
+  xlab('samples') + ylab('log2(normalized_counts)') +
+  theme_bw()
+
+```
+
+## Experimental design
+When we set the experimental design we can use the intercept in the linear model to specify a reference condition. In this case, the tissue compared are different and there is no a reference condition of one with respect to the others, so no intercept is used in the linear model.
+The features in the model are the tissue to which the replicates belong and are selected as retrieved in building the dataset for this analysis: liver, heart and colon.
+
+```{r}
+design <- model.matrix(~0 + group, data=de_object_normalized$samples)
+colnames(design) <- levels(de_object_normalized$samples$group)
+design
+```
+
+
+## Exploratory Analysis {.tabset .tabset-fade .tabset-pills}
+edgeR contains a function plotMDS, which operates on a DGEList object and generates a two-dimensional MDS representation of the samples. The default distance between two samples can be interpreted as the “typical” log fold change between the two samples, for the genes that are most different between them (by default, the top 500 genes, but this can be modified as shown below). 
+
+### MDS { .unnumbered}
+```{r, MDS}
+plotMDS(logcpm_norm, 
+        labels = c(liver_sample_id,heart_sample_id,colon_sample_id), 
+        col = rep(mypalette, each = 3),
+        cex = 0.85,
+        xlim = c(-8,5),
+        main = 'MDS of log2(CPM) using log fold change as distance')
+legend(-8, 3.5, legend = c("Liver", "Heart", "Colon"), fill = mypalette)
+```
+
+### PCA plot { .unnumbered}
+```{r, PCA}
+plotMDS(logcpm_norm, 
+        labels = c(liver_sample_id,heart_sample_id,colon_sample_id), 
+        col = rep(mypalette, each = 3),
+        cex = 0.85,
+        xlim = c(-8,5),
+        main = 'PCA of log2(CPM) using log fold change as distance',
+        gene.selection = 'common')
+legend(-8, 2.5, legend = c("Liver", "Heart", "Colon"), fill = mypalette)
+
+```
+
+We can also perform MDS on manually calculated distances, using the R function cmdscale and the Euclidean distance as distance.
+
+```{r}
+sample_dist <- as.matrix(dist(t(logcpm_norm)))
+mds <- data.frame(cmdscale(sample_dist))
+mds$tissue <- tissue
+
+p <- ggplot(mds, aes(X1,X2,color=tissue,shape=tissue)) + 
+  geom_point(size=4) +
+  scale_color_manual(values = mypalette,
+                    name = 'Tissue',
+                    labels = c('Liver','Heart','Colon'))+
+  scale_shape_manual(values = c(17,18,19),
+                     name = 'Tissue',
+                    labels = c('Liver','Heart','Colon')) +
+  theme_bw()
+
+grid.arrange(textGrob('MDS of log2(CPM) using Euclidean distance as distance',
+                      gp = gpar(fontsize = 1.5*10, fontface = "bold")),
+             p, 
+             heights = c(0.1, 1))
+```
+
+
+```{r pca labelled}
+plotMDS(logcpm_norm, 
+        labels = c(rep("male",3),c("male","female","female"),c("female","male","female")), 
+        col = rep(mypalette, each = 3),
+        cex = 0.85,
+        xlim = c(-8,5),
+        main = 'PCA of log2(CPM) using log fold change as distance',
+        gene.selection = 'common')
+legend(-8, 2.5, legend = c("Liver", "Heart", "Colon"), fill = mypalette)
+```
+
+
+
+## BCV 
+In order to fit the model used by edgeR it's necessary to evaluate if the normalized 
+counts can be modeled with a Negative Binomial distribution, which is used by edgeR itself
+to model the variability of counts. In order to do that, in the plot below we can observe as estimate for the dispersion of the NB the Biological Coefficient of Variation (BCV):
+
+```{r BCV}
+de_object_normalized <- estimateDisp(de_object_normalized,design)
+plotBCV(de_object_normalized)
+```
+
+The datasets have the following common dispersion estimate
+```{r}
+de_object_normalized$common.dispersion
+```
+
+
+## Model fitting
+Fit the data to the "generalized linear" model we designed
+```{r fitting}
+fit <- glmQLFit(de_object_normalized, design)
+
+```
+
+
+## Finding DE {.tabset .tabset-fade .tabset-pills}
+In this case, genes will be considered "DE" if:
+
+*   their FDR < 0.01
+*   their log-fold change is greater than 0 or lower than 0 (the lfc value is a threshold for the absolute value).
+
+The comparisons between tissues are:
+
+* Liver versus heart
+* Liver versus colon
+* Heart versus colon
+
+
+### Liver versus heart  { .unnumbered}
+```{r Liver versus heart}
+qlf.1vs2 <- glmQLFTest(fit, contrast=c(1,-1,0))
+
+# select the significant ones with corrected pvalue < 0.01:
+summary(decideTests(qlf.1vs2, p.value = 0.01, lfc = 0))
+
+```
+
+```{r}
+# Filtering and storing up and down regulated genes
+deg.1vs2 <- topTags(qlf.1vs2, n=20000, adjust.method = "BH", sort.by = "PValue", p.value = 0.01)$table
+up.genes.1vs2 <- row.names(deg.1vs2[deg.1vs2$logFC > 0,])
+down.genes.1vs2 <- row.names(deg.1vs2[deg.1vs2$logFC < 0,])
+deg.1vs2
+```
+
+
+### Liver versus colon  { .unnumbered}
+```{r Liver versus colon}
+qlf.1vs3 <- glmQLFTest(fit, contrast=c(1,0,-1))
+
+# select the significant ones with corrected pvalue < 0.01:
+summary(decideTests(qlf.1vs3, p.value = 0.01, lfc = 0))
+
+```
+
+```{r}
+deg.1vs3 <- topTags(qlf.1vs3, n=20000, adjust.method = "BH", sort.by = "PValue", p.value = 0.01)$table
+up.genes.1vs3 <- row.names(deg.1vs3[deg.1vs3$logFC > 0,])
+down.genes.1vs3 <- row.names(deg.1vs3[deg.1vs3$logFC < 0,])
+deg.1vs3
+```
+
+
+### Heart versus colon  { .unnumbered}
+```{r Heart versus colon}
+qlf.2vs3 <- glmQLFTest(fit, contrast=c(0,1,-1))
+
+# select the significant ones with corrected pvalue < 0.01:
+summary(decideTests(qlf.2vs3, p.value = 0.01, lfc = 0))
+
+```
+
+```{r}
+deg.2vs3 <- topTags(qlf.2vs3, n=20000, adjust.method = "BH", sort.by = "PValue", p.value = 0.01)$table
+up.genes.2vs3 <- row.names(deg.2vs3[deg.2vs3$logFC > 0,])
+down.genes.2vs3 <- row.names(deg.2vs3[deg.2vs3$logFC < 0,])
+deg.2vs3
+```
+
+
+Extracting list of genes up and down in each tissue:
+
+```{r List of gene up and down}
+
+# Liver
+up_genes_liver <- intersect(up.genes.1vs2, up.genes.1vs3)
+down_genes_liver <- intersect(down.genes.1vs2, down.genes.1vs3)
+
+# Heart 
+up_genes_heart <- intersect(down.genes.1vs2, up.genes.2vs3)
+down_genes_heart <- intersect(up.genes.1vs2, down.genes.2vs3)
+
+# Colon
+up_genes_colon <- intersect(down.genes.1vs3, down.genes.2vs3)
+down_genes_colon <- intersect(up.genes.1vs3, up.genes.2vs3)
+
+```
+
+# Export results to .xlsx file
+```{r tables de genes}
+create_de_df <- function(v1, v2, cols_name){
+  sq <- seq(max(length(v1), length(v2)))
+  df <- data.frame(v1[sq],
+                   v2[sq])
+  colnames(df) <- cols_name
+  return(df)
+}
+
+
+a_1vs2 <- create_de_df(up.genes.1vs2, down.genes.1vs2, c('up_liver_vs_heart','down_liver_vs_heart'))
+b_1vs3 <- create_de_df(up.genes.1vs3, down.genes.1vs3, c('up_liver_vs_colon', 'down_liver_vs_colon'))
+c_2vs3 <- create_de_df(up.genes.2vs3, down.genes.2vs3, c('up_heart_vs_colon', 'down_heart_vs_colon'))
+
+d_de_liver <- create_de_df(up_genes_liver, down_genes_liver, c('up_liver','down_liver'))
+e_de_heart <- create_de_df(up_genes_heart, down_genes_heart, c('up_heart','down_heart'))
+f_de_colon <- create_de_df(up_genes_colon, down_genes_colon, c('up_colon','down_colon'))
+
+```
+
+```{r exporting .xlsx }
+xlsx::write.xlsx(a_1vs2, paste(wd,"966292_DE_genes.xlsx"), 
+                 sheetName = "Liver vs heart",
+                 col.names = TRUE, 
+                 row.names = FALSE, 
+                 append = FALSE, 
+                 showNA=FALSE)
+
+xlsx::write.xlsx(b_1vs3, paste(wd,"966292_DE_genes.xlsx"), 
+                 sheetName = "Liver vs colon",
+                 col.names = TRUE, 
+                 row.names = FALSE, 
+                 append = TRUE, 
+                 showNA=FALSE)
+
+xlsx::write.xlsx(c_2vs3, paste(wd,"966292_DE_genes.xlsx"), 
+                 sheetName = "Heart vs colon",
+                 col.names = TRUE, 
+                 row.names = FALSE, 
+                 append = TRUE, 
+                 showNA=FALSE)
+
+xlsx::write.xlsx(d_de_liver, paste(wd,"966292_DE_genes.xlsx"), 
+                 sheetName = "DEG Liver",
+                 col.names = TRUE, 
+                 row.names = FALSE, 
+                 append = TRUE, 
+                 showNA=FALSE)
+
+xlsx::write.xlsx(e_de_heart, paste(wd,"966292_DE_genes.xlsx"), 
+                 sheetName = "DEG Heart",
+                 col.names = TRUE, 
+                 row.names = FALSE, 
+                 append = TRUE, 
+                 showNA=FALSE)
+
+xlsx::write.xlsx(f_de_colon, paste(wd,"966292_DE_genes.xlsx"), 
+                 sheetName = "DEG Colon",
+                 col.names = TRUE, 
+                 row.names = FALSE, 
+                 append = TRUE, 
+                 showNA=FALSE)
+  
+```
+
+# GO analysis on DE genes
+In order to perform functional enrichment for this analysis, function enrichGO() contained in the package clusterProfiler is used. 
+
+Firstly, we have to remove the version from the ENSG ID.
+```{r remove version from ENSG}
+up_genes_liver_noversion <- sapply(strsplit(up_genes_liver, "\\."), "[[", 1)
+up_genes_heart_noversion <- sapply(strsplit(up_genes_heart, "\\."), "[[", 1)
+up_genes_colon_noversion <- sapply(strsplit(up_genes_colon, "\\."), "[[", 1)
+
+```
+
+
+
+```{r GO liver, fig.width=10}
+go_liver <- enrichGO(up_genes_liver_noversion, keyType = "ENSEMBL", 
+                                      OrgDb = org.Hs.eg.db,
+                                      ont = 'BP')
+dotplot(go_liver)
+
+```
+
+```{r GO heart, fig.width=10}
+go_heart <- enrichGO(up_genes_heart_noversion, keyType = "ENSEMBL", 
+                                      OrgDb = org.Hs.eg.db,
+                                      ont = 'BP')
+dotplot(go_heart)
+```
+
+```{r GO colon, fig.width=10}
+go_colon <- enrichGO(up_genes_colon_noversion, keyType = "ENSEMBL", 
+                                      OrgDb = org.Hs.eg.db,
+                                      ont = 'BP')
+dotplot(go_colon)
+
+```
+
+Now we select the genes up-regulated in tissue 1 (liver) in both comparison and sort them by the FDR:
+```{r up-regulated gene in tissue 1}
+
+up_1vs2_FDR <- data.frame(deg.1vs2[deg.1vs2$logFC > 0,]$FDR)
+up_1vs2_FDR$ENSG <- row.names(deg.1vs2[deg.1vs2$logFC > 0,])
+row.names(up_1vs2_FDR) <- up_1vs2_FDR$ENSG
+
+up_1vs3_FDR <- data.frame(deg.1vs3[deg.1vs3$logFC > 0,]$FDR)
+up_1vs3_FDR$ENSG <- row.names(deg.1vs3[deg.1vs3$logFC > 0,])
+row.names(up_1vs3_FDR) <- up_1vs3_FDR$ENSG
+
+up_both <- merge(up_1vs2_FDR,up_1vs3_FDR)
+sort_up_both <- up_both[order(up_both$deg.1vs2.deg.1vs2.logFC...0....FDR,up_both$deg.1vs3.deg.1vs3.logFC...0....FDR),]
+
+
+```
+
+# Session info
+
+```{r}
+sessionInfo()
+```
+
+
+
